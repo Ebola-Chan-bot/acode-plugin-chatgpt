@@ -1,3 +1,4 @@
 node_modules
 secrets
 AI.zip
+dist/main.js

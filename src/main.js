@@ -15,7 +15,8 @@ import { ChatOpenAI } from "@langchain/openai";
 import copy from "copy-to-clipboard";
 import { v4 as uuidv4 } from "uuid";
 import { APIKeyManager } from "./api_key";
-import { AI_PROVIDERS, OPENAI_LIKE, copyIconSvg, sendIconSvg, stopIconSvg } from "./constants";
+import { AI_PROVIDERS, OPENAI_LIKE, GITHUB_COPILOT, copyIconSvg, sendIconSvg, stopIconSvg } from "./constants";
+import { CopilotTokenManager } from "./copilot";
 import { getModelsFromProvider } from "./utils";
 
 const multiPrompt = acode.require("multiPrompt");
@@ -36,6 +37,8 @@ const AI_HISTORY_PATH = window.DATA_STORAGE + "chatgpt";
 let CURRENT_SESSION_FILEPATH = null;
 
 class AIAssistant {
+  copilotManager = new CopilotTokenManager();
+
   async init($page) {
     /**
      * Scripts and styles for Highlighting
@@ -81,8 +84,6 @@ class AIAssistant {
       })
     }, "✨", 'all');
 
-    $page.id = "acode-ai-assistant";
-    $page.settitle("AI Assistant");
     this.$page = $page;
     const menuBtn = tag("span", {
       className: "icon more_vert",
@@ -113,7 +114,9 @@ class AIAssistant {
         action: "insert-context",
       },
     });
-    this.$page.header.append(newChatBtn, insertContextBtn, historyBtn, menuBtn);
+    // Toolbar for sidebar
+    this.$toolbar = tag("div", { className: "ai-toolbar" });
+    this.$toolbar.append(newChatBtn, insertContextBtn, historyBtn, menuBtn);
 
     historyBtn.onclick = this.myHistory.bind(this);
     newChatBtn.onclick = this.newChat.bind(this);
@@ -165,6 +168,22 @@ class AIAssistant {
               this.initiateModel(OPENAI_LIKE, apiKey, modelName);
               this.newChat();
             }
+            // Handle GitHub Copilot
+            else if (providerSelectBox === GITHUB_COPILOT) {
+              if (!this.copilotManager.isAuthorized) {
+                await this.copilotManager.authorize();
+              }
+              const sessionToken = await this.copilotManager.getSessionToken();
+              loader.showTitleLoader();
+              window.toast("Fetching available models from Copilot", 2000);
+              let modelList = await getModelsFromProvider(GITHUB_COPILOT, sessionToken);
+              loader.removeTitleLoader();
+              let modelNme = await select("Select AI Model", modelList);
+              window.localStorage.setItem("ai-assistant-provider", GITHUB_COPILOT);
+              window.localStorage.setItem("ai-assistant-model-name", modelNme);
+              this.initiateModel(GITHUB_COPILOT, sessionToken, modelNme);
+              this.newChat();
+            }
             // Handle other providers
             else {
               // check for api key
@@ -196,10 +215,25 @@ class AIAssistant {
           break;
         case 'model':
           let provider = window.localStorage.getItem("ai-assistant-provider");
-          let apiKey = await this.apiKeyManager.getAPIKey(provider);
 
+          // Handle GitHub Copilot
+          if (provider === GITHUB_COPILOT) {
+            const sessionToken = await this.copilotManager.getSessionToken();
+            loader.showTitleLoader();
+            window.toast("Fetching available models from Copilot", 2000);
+            let modelList = await getModelsFromProvider(GITHUB_COPILOT, sessionToken);
+            loader.removeTitleLoader();
+            let modelNme = await select("Select AI Model", modelList, {
+              default: window.localStorage.getItem("ai-assistant-model-name") || ""
+            });
+            if (window.localStorage.getItem("ai-assistant-model-name") != modelNme) {
+              window.localStorage.setItem("ai-assistant-model-name", modelNme);
+              this.initiateModel(GITHUB_COPILOT, sessionToken, modelNme);
+            }
+          }
           // Handle OpenAI-Like providers differently
-          if (provider === OPENAI_LIKE) {
+          else if (provider === OPENAI_LIKE) {
+            let apiKey = await this.apiKeyManager.getAPIKey(provider);
             let currentModel = window.localStorage.getItem("ai-assistant-model-name") || "";
             let modelName = await prompt("Enter Model", currentModel, "text", { required: true });
             if (modelName) {
@@ -209,6 +243,7 @@ class AIAssistant {
           } 
           // Handle other providers normally
           else {
+            let apiKey = await this.apiKeyManager.getAPIKey(provider);
             loader.showTitleLoader();
             window.toast("Fetching available models from your account", 2000);
             let modelList = await getModelsFromProvider(provider, apiKey);
@@ -251,8 +286,42 @@ class AIAssistant {
     this.$stopGenerationBtn.innerHTML = stopIconSvg;
     this.$stopGenerationBtn.onclick = this.stopGenerating.bind(this);
     this.$inputBox.append(this.$chatTextarea, this.$sendBtn, this.$stopGenerationBtn);
-    mainApp.append(this.$inputBox, this.$chatBox);
-    this.$page.append(mainApp);
+    mainApp.append(this.$chatBox, this.$inputBox);
+
+    // Register sidebar
+    const SIDEBAR_ID = 'acode-ai-assistant';
+    this.sidebarId = SIDEBAR_ID;
+
+    // Remove any leftover sidebar entries from a previous version
+    while (true) {
+      try {
+        sidebarApps.get(SIDEBAR_ID);
+        sidebarApps.remove(SIDEBAR_ID);
+      } catch (_) {
+        break;
+      }
+    }
+
+    sidebarApps.add(
+      'chat_bubble',
+      SIDEBAR_ID,
+      'AI Assistant',
+      (container) => {
+        const wrapper = tag("div", { id: "acode-ai-assistant" });
+        wrapper.append(this.$toolbar, mainApp);
+        container.append(wrapper);
+      },
+      false,
+      async () => {
+        if (!this.modelInstance) {
+          await this.run();
+        }
+      }
+    );
+
+    // Wire up send button
+    this.$sendBtn.addEventListener("click", this.sendQuery.bind(this));
+
     this.messageHistories = {};
     this.messageSessionConfig = {
       configurable: {
@@ -262,34 +331,28 @@ class AIAssistant {
   }
 
   async run() {
+    if (this.modelInstance && this.$mdIt) return;
     try {
-      let passPhrase;
-      if (await fs(window.DATA_STORAGE + "secret.key").exists()) {
-        passPhrase = await fs(window.DATA_STORAGE + "secret.key").readFile(
-          "utf-8",
-        );
-      } else {
-        let secretPassphrase = await prompt(
-          "Enter a secret pass pharse to save the api key",
-          "",
-          "text",
-          {
-            required: true,
-          },
-        );
-        if (!secretPassphrase) return;
-        passPhrase = secretPassphrase;
-      }
-      this.apiKeyManager = new APIKeyManager(passPhrase);
       let token;
       let providerNme = window.localStorage.getItem("ai-assistant-provider");
       if (providerNme) {
-        token = await this.apiKeyManager.getAPIKey(providerNme);
+        if (providerNme === GITHUB_COPILOT) {
+          // Copilot: get session token, auto-authorize if needed
+          if (!this.copilotManager.isAuthorized) {
+            await this.copilotManager.authorize();
+          }
+          token = await this.copilotManager.getSessionToken();
+        } else {
+          // Other providers need APIKeyManager (passphrase-based)
+          await this.#ensureApiKeyManager();
+          token = await this.apiKeyManager.getAPIKey(providerNme);
+        }
       } else {
         let modelProvider = await select("Select AI Provider", AI_PROVIDERS);
 
         // Handle OpenAI-Like providers
         if (modelProvider === OPENAI_LIKE) {
+          await this.#ensureApiKeyManager();
           // Prompt for required information
           const apiKey = await prompt("API Key", "", "text", { required: true });
           if (!apiKey) return;
@@ -308,12 +371,28 @@ class AIAssistant {
 
           token = apiKey;
           providerNme = OPENAI_LIKE;
-          await fs(window.DATA_STORAGE).createFile("secret.key", passPhrase);
           await this.apiKeyManager.saveAPIKey(OPENAI_LIKE, token);
           window.toast("Configuration saved 🎉", 3000);
         } 
+        // Handle GitHub Copilot
+        else if (modelProvider === GITHUB_COPILOT) {
+          await this.copilotManager.authorize();
+          const sessionToken = await this.copilotManager.getSessionToken();
+          loader.showTitleLoader();
+          window.toast("Fetching available models from Copilot", 2000);
+          let modelList = await getModelsFromProvider(GITHUB_COPILOT, sessionToken);
+          loader.removeTitleLoader();
+          const modelNme = await select("Select AI Model", modelList);
+
+          window.localStorage.setItem("ai-assistant-provider", GITHUB_COPILOT);
+          window.localStorage.setItem("ai-assistant-model-name", modelNme);
+          providerNme = GITHUB_COPILOT;
+          token = sessionToken;
+          window.toast("Configuration saved 🎉", 3000);
+        }
         // Handle other providers
         else {
+          await this.#ensureApiKeyManager();
           // no prompt for api key in case of ollama
           let apiKey =
             modelProvider == AI_PROVIDERS[2]
@@ -332,7 +411,6 @@ class AIAssistant {
           window.localStorage.setItem("ai-assistant-model-name", modelNme);
           providerNme = modelProvider;
           token = apiKey;
-          await fs(window.DATA_STORAGE).createFile("secret.key", passPhrase);
           await this.apiKeyManager.saveAPIKey(providerNme, token);
           window.toast("Configuration saved 🎉", 3000);
         }
@@ -360,12 +438,34 @@ class AIAssistant {
         },
       });
 
-      this.$sendBtn.addEventListener("click", this.sendQuery.bind(this));
-
-      this.$page.show();
+      // Model and markdown renderer initialized
     } catch (e) {
-      console.log(e);
+      console.error("AI Assistant init error:", e);
+      const msg = e && (e.message || String(e)) || "Unknown error";
+      window.toast(msg, 4000);
     }
+  }
+
+  /**
+   * Ensure APIKeyManager is initialized (prompt for passphrase if needed).
+   * Only needed for non-Copilot providers that store encrypted API keys.
+   */
+  async #ensureApiKeyManager() {
+    if (this.apiKeyManager) return;
+    let passPhrase;
+    if (await fs(window.DATA_STORAGE + "secret.key").exists()) {
+      passPhrase = await fs(window.DATA_STORAGE + "secret.key").readFile("utf-8");
+    } else {
+      passPhrase = await prompt(
+        "Enter a secret passphrase to encrypt your API key",
+        "",
+        "text",
+        { required: true },
+      );
+      if (!passPhrase) throw new Error("Passphrase is required");
+      await fs(window.DATA_STORAGE).createFile("secret.key", passPhrase);
+    }
+    this.apiKeyManager = new APIKeyManager(passPhrase);
   }
 
   initiateModel(providerNme, token, model) {
@@ -399,6 +499,19 @@ class AIAssistant {
         this.modelInstance = new ChatGroq({
           apiKey: token,
           model,
+        });
+        break;
+      case GITHUB_COPILOT: // GitHub Copilot
+        this.modelInstance = new ChatOpenAI({
+          apiKey: "copilot",
+          model,
+          configuration: {
+            baseURL: "https://api.githubcopilot.com",
+            defaultHeaders: {
+              "Authorization": `Bearer ${token}`,
+              "Copilot-Integration-Id": "vscode-chat",
+            },
+          },
         });
         break;
       case OPENAI_LIKE: // OpenAI-Like providers
@@ -665,6 +778,10 @@ class AIAssistant {
     /*
     event on clicking send prompt button of chatgpt
     */
+    if (!this.modelInstance || !this.$mdIt) {
+      await this.run();
+      if (!this.modelInstance) return;
+    }
     const chatText = this.$chatTextarea;
     if (chatText.value != "") {
       this.appendUserQuery(chatText.value);
@@ -750,6 +867,14 @@ class AIAssistant {
     @parm: question {string} - user prompt
     */
     try {
+      // Refresh Copilot session token if needed
+      const currentProvider = window.localStorage.getItem("ai-assistant-provider");
+      if (currentProvider === GITHUB_COPILOT) {
+        const freshToken = await this.copilotManager.getSessionToken();
+        const model = window.localStorage.getItem("ai-assistant-model-name");
+        this.initiateModel(GITHUB_COPILOT, freshToken, model);
+      }
+
       // get all gptchat element
       const responseBox = Array.from(document.querySelectorAll(".ai_message"));
       
@@ -863,7 +988,9 @@ class AIAssistant {
   }
 
   async destroy() {
-    //sidebarApps.remove("dall-e-ai");
+    if (this.sidebarId) {
+      try { sidebarApps.remove(this.sidebarId); } catch(e) {}
+    }
     editorManager.editor.commands.removeCommand("ai_assistant");
      window.localStorage.removeItem(window.localStorage.getItem("ai-assistant-provider"));
     window.localStorage.removeItem("ai-assistant-provider");

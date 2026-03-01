@@ -1,5 +1,6 @@
 import { Ollama } from "ollama/browser";
-import { AI_PROVIDERS } from "./constants";
+import { AI_PROVIDERS, GITHUB_COPILOT } from "./constants";
+import { listCopilotModels } from "./copilot";
 
 export async function getModelsFromProvider(provider, apiKey) {
   let modelList;
@@ -89,6 +90,11 @@ export async function getModelsFromProvider(provider, apiKey) {
 
         const groqAIData = await groqAIResponse.json();
         modelList = groqAIData.data.map((item) => item.id);
+        break;
+
+      case GITHUB_COPILOT: // GitHub Copilot
+        // apiKey here is the Copilot session token
+        modelList = await listCopilotModels(apiKey);
         break;
 
       case OPENAI_LIKE: // OpenAI-Like
