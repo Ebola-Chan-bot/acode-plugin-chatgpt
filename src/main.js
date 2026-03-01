@@ -30,6 +30,8 @@ const sidebarApps = acode.require("sidebarApps");
 const toInternalUrl = acode.require("toInternalUrl");
 const contextMenu = acode.require("contextMenu");
 const selectionMenu = acode.require("selectionMenu");
+const openFolder = acode.require("openfolder");
+const fsOperation = acode.require("fsOperation");
 const { editor } = editorManager;
 
 const AI_HISTORY_PATH = window.DATA_STORAGE + "chatgpt";
@@ -307,6 +309,7 @@ class AIAssistant {
       SIDEBAR_ID,
       'AI Assistant',
       (container) => {
+        container.style.position = "relative";
         const wrapper = tag("div", { id: "acode-ai-assistant" });
         wrapper.append(this.$toolbar, mainApp);
         container.append(wrapper);

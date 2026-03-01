@@ -33,6 +33,7 @@ function nativeRequest(method, url, data, headers = {}) {
         const json = typeof response.data === "string"
           ? JSON.parse(response.data)
           : response.data;
+        console.log(`[Copilot] ${method} ${url} →`, JSON.stringify(json).substring(0, 200));
         resolve(json);
       } catch (e) {
         reject(new Error(`${method} ${url}: invalid JSON response: ${response.data}`));
@@ -40,6 +41,7 @@ function nativeRequest(method, url, data, headers = {}) {
     };
 
     const failure = (response) => {
+      console.log(`[Copilot] ${method} ${url} FAIL status=${response.status}`, (response.error || "").substring(0, 200));
       // cordova-plugin-advanced-http puts the response body in response.error
       let json;
       try {
@@ -107,19 +109,23 @@ export async function deviceCodeFlow() {
       "取消",
     );
 
-    dlg.onhide = () => {
+    // DialogBox.onhide is a setter method, not a property
+    dlg.onhide(() => {
+      if (closed) return; // already resolved/rejected
       closed = true;
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
       reject(new Error("用户取消了授权"));
-    };
+    });
 
     let interval = pollInterval;
     const deadline = Date.now() + expires_in * 1000;
 
-    timer = setInterval(async () => {
+    // Use chained setTimeout instead of setInterval so that
+    // "slow_down" responses can actually increase the delay.
+    async function poll() {
       if (closed || Date.now() > deadline) {
-        clearInterval(timer);
         if (!closed) {
+          closed = true;
           dlg.hide();
           reject(new Error("授权超时"));
         }
@@ -133,7 +139,6 @@ export async function deviceCodeFlow() {
         });
 
         if (tokenResp.access_token) {
-          clearInterval(timer);
           closed = true;
           dlg.hide();
           resolve(tokenResp.access_token);
@@ -144,20 +149,24 @@ export async function deviceCodeFlow() {
         if (error === "slow_down") {
           interval += 5;
         } else if (error === "expired_token") {
-          clearInterval(timer);
           closed = true;
           dlg.hide();
           reject(new Error("授权码已过期，请重试"));
+          return;
         } else if (error !== "authorization_pending") {
-          clearInterval(timer);
           closed = true;
           dlg.hide();
           reject(new Error(`授权失败: ${error}`));
+          return;
         }
       } catch (e) {
-        // network error, just retry
+        // network error, just retry next cycle
       }
-    }, interval * 1000);
+      if (!closed) {
+        timer = setTimeout(poll, interval * 1000);
+      }
+    }
+    timer = setTimeout(poll, interval * 1000);
   });
 }
 
